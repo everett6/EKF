@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rocket Tracker</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 2c5 4 7 10 6 17l3 5-5 1-1 4h-6l-1-4-5-1 3-5C9 12 11 6 16 2z' fill='%234fa3ff'/></svg>">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="app.css">
+<script src="vendor/leaflet/leaflet.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2c5 4 7 10 6 17l3 5-5 1-1 4h-6l-1-4-5-1 3-5C9 12 11 6 16 2z"/></svg>
+    <div>
+      <div class="brand-name">Rocket Tracker</div>
+      <div class="brand-sub" id="rocketName">–</div>
+    </div>
+  </div>
+  <ol class="timeline" id="timeline"></ol>
+  <div class="run-controls" id="runControls">
+    <span class="pill" id="runState">idle</span>
+    <select id="speedTop" title="Playback speed" aria-label="Playback speed">
+      <option value="1">1×</option><option value="2">2×</option><option value="5">5×</option>
+      <option value="10">10×</option><option value="0">Max</option>
+    </select>
+    <button class="btn" id="pauseBtn" title="Pause / resume (space)">Pause</button>
+    <button class="btn danger" id="stopBtn">Stop</button>
+    <button class="icon-btn" id="themeBtn" title="Switch light/dark" aria-label="Switch light/dark">◐</button>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="map-wrap">
+    <div id="map"></div>
+    <div class="hud" id="hud">
+      <div><span>T+</span><b id="hudT">–</b></div>
+      <div><span>Altitude</span><b id="hudAlt">–</b></div>
+      <div><span>Speed</span><b id="hudSpd">–</b></div>
+      <div><span>Vertical</span><b id="hudVz">–</b></div>
+    </div>
+    <div class="map-tools">
+      <button class="btn small" id="followBtn" aria-pressed="false">Follow rocket</button>
+      <button class="btn small" id="fitBtn">Fit all</button>
+      <button class="btn small" id="meBtn">My location</button>
+    </div>
+    <div class="map-legend">
+      <span><i style="background:var(--track)"></i>Track</span>
+      <span><i style="background:var(--pred)"></i>Predicted</span>
+      <span><i style="background:var(--land)"></i>Landing 95%</span>
+      <span><i style="background:var(--pad)"></i>If launched now</span>
+    </div>
+  </section>
+
+  <aside class="panel">
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="flight" aria-selected="true">Flight</button>
+      <button role="tab" data-tab="weather">Weather</button>
+      <button role="tab" data-tab="setup">Setup</button>
+      <button role="tab" data-tab="log">Log</button>
+    </nav>
+
+    <!-- FLIGHT -->
+    <div class="tab-body" data-body="flight">
+      <div class="card" id="startCard">
+        <h3>Start a run</h3>
+        <div class="seg" id="sourceSeg">
+          <button data-src="sim" class="on">Simulation</button>
+          <button data-src="replay">Replay a log</button>
+          <button data-src="follow">Live from logger</button>
+        </div>
+        <p class="hint" data-hint="sim">Flies a simulated rocket that behaves a little differently from your setup, so you can watch the filter adapt.</p>
+        <div data-hint="replay" hidden>
+          <label class="field"><span>Log file</span>
+            <select id="fileSelect"><option value="">No logs yet</option></select></label>
+          <label class="upload">Upload CSV<input type="file" id="uploadInput" accept=".csv,text/csv"></label>
+          <p class="hint" id="dataDir"></p>
+        </div>
+        <div data-hint="follow" hidden>
+          <label class="field"><span>CSV being written by the logger</span>
+            <input id="followPath" placeholder="/home/everett/Programs/Data/datalogger.csv"></label>
+          <p class="hint">The tracker reads new rows as they are written and detects launch automatically.</p>
+        </div>
+        <div class="row-fields">
+          <label class="field"><span>Speed</span>
+            <select id="speedStart"><option value="1">1×</option><option value="2">2×</option>
+              <option value="5" selected>5×</option><option value="10">10×</option><option value="0">Max</option></select></label>
+          <label class="field"><span>Weather</span>
+            <select id="weatherMode"><option value="live">Live (Open-Meteo)</option>
+              <option value="offline">Offline (standard)</option></select></label>
+        </div>
+        <label class="check"><input type="checkbox" id="flipLon"> Log has west longitudes as positive (old logger)</label>
+        <button class="btn primary wide" id="startBtn">Start</button>
+        <p class="error" id="startErr" hidden></p>
+      </div>
+
+      <div class="card" id="landingCard">
+        <div class="card-head">
+          <h3 id="landingTitle">If launched now</h3>
+          <span class="badge" id="landingBadge">forecast</span>
+        </div>
+        <div class="big-stats">
+          <div><span>From pad</span><b id="lDist">–</b><small id="lBear"></small></div>
+          <div><span>Lands in</span><b id="lEta">–</b><small id="lEtaSub"></small></div>
+          <div><span>95% area</span><b id="lEll">–</b><small>ellipse axes</small></div>
+        </div>
+        <div class="kv"><span>From you</span><span id="lFromMe">tap “My location”</span></div>
+        <div class="kv"><span>Apogee</span><span id="lApogee">–</span></div>
+        <div class="kv"><span>Coordinates</span>
+          <span><span id="lCoord">–</span> <button class="link" id="copyBtn">Copy</button>
+          <a class="link" id="mapsLink" target="_blank" rel="noopener">Maps</a></span></div>
+        <div class="kv" id="truthRow" hidden><span>Actual (simulated)</span><span id="lTruth">–</span></div>
+      </div>
+
+      <div class="card">
+        <h3>Altitude</h3>
+        <div class="chart" id="chartAlt"></div>
+      </div>
+      <div class="card">
+        <h3>Side view <small>distance from pad vs altitude</small></h3>
+        <div class="chart" id="chartSide"></div>
+      </div>
+      <div class="card">
+        <h3>Landing uncertainty <small>95% ellipse, long axis</small></h3>
+        <div class="chart" id="chartUnc"></div>
+      </div>
+      <div class="card">
+        <h3>Filter health</h3>
+        <div class="kv"><span>Wind correction learned</span><span id="fWind">–</span></div>
+        <div class="kv"><span>Drag scale</span><span id="fDrag">–</span></div>
+        <div class="kv"><span>Position uncertainty (1σ)</span><span id="fSigma">–</span></div>
+        <div class="kv"><span>Rejected outlier readings</span><span id="fRej">–</span></div>
+      </div>
+    </div>
+
+    <!-- WEATHER -->
+    <div class="tab-body" data-body="weather" hidden>
+      <div class="card">
+        <div class="card-head"><h3>Conditions</h3><button class="btn small" id="wxRefresh">Refresh now</button></div>
+        <div class="kv"><span>Source</span><span id="wxSource">–</span></div>
+        <div class="kv"><span>Forecast valid</span><span id="wxValid">–</span></div>
+        <div class="kv"><span>Fetched</span><span id="wxFetched">–</span></div>
+        <div class="kv"><span>Auto refresh</span><span id="wxEvery">–</span></div>
+        <div class="kv"><span>Wind at rocket</span><span id="wxNow">–</span></div>
+        <p class="error" id="wxErr" hidden></p>
+      </div>
+      <div class="card">
+        <h3>Wind by altitude <small>arrows point where the wind blows</small></h3>
+        <div class="chart tall" id="chartWind"></div>
+      </div>
+      <div class="card">
+        <h3>Levels</h3>
+        <div class="table-wrap"><table id="wxTable">
+          <thead><tr><th>Alt MSL</th><th>Wind</th><th>From</th><th>Temp</th><th>Pressure</th></tr></thead>
+          <tbody></tbody></table></div>
+      </div>
+    </div>
+
+    <!-- SETUP -->
+    <div class="tab-body" data-body="setup" hidden>
+      <p class="notice" id="setupLocked" hidden>Stop the current run to change the setup.</p>
+      <form id="setupForm"></form>
+      <div class="setup-actions">
+        <button class="btn primary" id="saveCfg">Save setup</button>
+        <button class="btn" id="exportCfg">Export JSON</button>
+        <label class="btn upload-btn">Import JSON<input type="file" id="importCfg" accept=".json,application/json"></label>
+        <button class="btn danger-outline" id="resetCfg">Reset to defaults</button>
+      </div>
+      <p class="error" id="setupErr" hidden></p>
+    </div>
+
+    <!-- LOG -->
+    <div class="tab-body" data-body="log" hidden>
+      <div class="card">
+        <div class="card-head"><h3>Events</h3><a class="btn small" href="/api/export.csv" download>Export track CSV</a></div>
+        <ul class="events" id="events"></ul>
+      </div>
+    </div>
+  </aside>
+</main>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>

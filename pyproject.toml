@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rocket-tracker"
+version = "0.2.0"
+description = "Live rocket tracking (EKF) with weather-aware landing prediction"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.7"]
+window = ["pywebview>=4"]
+test = ["pytest>=7"]
+
+[project.scripts]
+rocket-tracker = "rocket_tracker.cli:main"
+
+[tool.setuptools]
+packages = ["rocket_tracker"]
+
+[tool.setuptools.package-data]
+rocket_tracker = ["static/*", "static/vendor/leaflet/*", "static/vendor/leaflet/images/*"]

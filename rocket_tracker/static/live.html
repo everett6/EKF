@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rocket Tracker</title>
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<script src="vendor/leaflet/leaflet.js"></script>
+<style>
+  :root { --bg:#0f1217; --panel:#171b22; --line:#262c36; --text:#e6e9ee; --muted:#8b94a3;
+          --track:#4fa3ff; --pred:#ffb547; --land:#ff5d5d; --gps:#7ee0a1; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; display:flex; height:100vh; }
+  #map { flex:1; min-width:0; }
+  aside { width:340px; background:var(--panel); border-left:1px solid var(--line);
+          overflow-y:auto; padding:16px; }
+  h1 { font-size:16px; margin:0 0 2px; }
+  .sub { color:var(--muted); font-size:12px; margin-bottom:14px; }
+  .phase { display:inline-block; padding:2px 8px; border-radius:10px; background:#2a3342;
+           font-size:12px; text-transform:uppercase; letter-spacing:.05em; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:12px 0; }
+  .stat .k { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+  .stat .v { font-size:20px; font-variant-numeric:tabular-nums; }
+  .stat .v small { font-size:12px; color:var(--muted); }
+  section { border-top:1px solid var(--line); padding-top:12px; margin-top:12px; }
+  h2 { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin:0 0 8px; }
+  .row { display:flex; justify-content:space-between; padding:2px 0; font-variant-numeric:tabular-nums; }
+  .row span:first-child { color:var(--muted); }
+  #events { font-size:12px; color:var(--muted); max-height:140px; overflow-y:auto; }
+  #chart { width:100%; height:120px; display:block; }
+  .legend span { display:inline-flex; align-items:center; gap:5px; margin-right:10px; font-size:12px; color:var(--muted); }
+  .legend i { width:14px; height:3px; display:inline-block; }
+  @media (max-width: 760px) { body { flex-direction:column; } aside { width:100%; height:45vh; border-left:0; } }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<aside>
+  <h1 id="title">Rocket Tracker</h1>
+  <div class="sub" id="sub">Waiting for telemetry…</div>
+  <span class="phase" id="phase">pad</span>
+  <div class="grid">
+    <div class="stat"><div class="k">Flight time</div><div class="v" id="t">–</div></div>
+    <div class="stat"><div class="k">Altitude AGL</div><div class="v" id="alt">–</div></div>
+    <div class="stat"><div class="k">Speed</div><div class="v" id="spd">–</div></div>
+    <div class="stat"><div class="k">Apogee</div><div class="v" id="apo">–</div></div>
+  </div>
+  <section>
+    <h2>Predicted landing</h2>
+    <div class="row"><span>Distance / bearing</span><span id="ldist">–</span></div>
+    <div class="row"><span>95% ellipse</span><span id="lell">–</span></div>
+    <div class="row"><span>Time to landing</span><span id="ltime">–</span></div>
+    <div class="row"><span>Coordinates</span><span id="lcoord">–</span></div>
+  </section>
+  <section>
+    <h2>Altitude</h2>
+    <svg id="chart" viewBox="0 0 300 120" preserveAspectRatio="none"></svg>
+  </section>
+  <section>
+    <h2>Weather</h2>
+    <div class="row"><span>Source</span><span id="wsrc">–</span></div>
+    <div class="row"><span>Forecast valid</span><span id="wvalid">–</span></div>
+    <div class="row"><span>Wind at rocket</span><span id="wnow">–</span></div>
+    <div class="row"><span>Measured wind correction</span><span id="wbias">–</span></div>
+    <div class="row"><span>Drag scale estimate</span><span id="kscale">–</span></div>
+  </section>
+  <section>
+    <h2>Events</h2>
+    <div id="events"></div>
+  </section>
+  <section class="legend">
+    <span><i style="background:var(--track)"></i>Filtered track</span>
+    <span><i style="background:var(--gps)"></i>GPS fixes</span>
+    <span><i style="background:var(--pred)"></i>Predicted path</span>
+    <span><i style="background:var(--land)"></i>Landing 95%</span>
+  </section>
+</aside>
+<script>
+const $ = id => document.getElementById(id);
+const map = L.map('map', { zoomControl: true });
+const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  { maxZoom: 19, attribution: '&copy; OpenStreetMap' });
+const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  { maxZoom: 19, attribution: 'Esri World Imagery' });
+sat.addTo(map);
+L.control.layers({ 'Satellite': sat, 'Map': osm }).addTo(map);
+
+const track = L.polyline([], { color: '#4fa3ff', weight: 3 }).addTo(map);
+const gps = L.layerGroup().addTo(map);
+const path = L.polyline([], { color: '#ffb547', weight: 2, dashArray: '6 6' }).addTo(map);
+const ellipse = L.polygon([], { color: '#ff5d5d', weight: 2, fillOpacity: 0.12 }).addTo(map);
+const history = L.polyline([], { color: '#ff5d5d', weight: 1, opacity: 0.25 }).addTo(map);
+const samples = L.layerGroup().addTo(map);
+const landing = L.circleMarker([0, 0], { radius: 6, color: '#ff5d5d', fillOpacity: 1 });
+const rocket = L.circleMarker([0, 0], { radius: 7, color: '#fff', fillColor: '#4fa3ff', fillOpacity: 1 });
+let pad = null, fitted = false;
+
+const fmt = (v, d = 0) => (v == null || isNaN(v)) ? '–' : Number(v).toFixed(d);
+const haversine = (a, b) => {
+  const R = 6371000, r = Math.PI / 180;
+  const dLat = (b[0] - a[0]) * r, dLon = (b[1] - a[1]) * r;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a[0] * r) * Math.cos(b[0] * r) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+};
+const bearing = (a, b) => {
+  const r = Math.PI / 180, y = Math.sin((b[1] - a[1]) * r) * Math.cos(b[0] * r);
+  const x = Math.cos(a[0] * r) * Math.sin(b[0] * r) - Math.sin(a[0] * r) * Math.cos(b[0] * r) * Math.cos((b[1] - a[1]) * r);
+  return (Math.atan2(y, x) / r + 360) % 360;
+};
+
+function drawChart(tr, pred) {
+  const svg = $('chart');
+  if (!tr || tr.length < 2) { svg.innerHTML = ''; return; }
+  const pts = tr.map(p => [p[3], p[2]]);
+  const tMax = Math.max(pts[pts.length - 1][0] + (pred ? Math.max(pred.time_to_landing, 0) : 0), 1);
+  const aMax = Math.max(...pts.map(p => p[1]), pred ? pred.apogee_agl : 0, 10) * 1.08;
+  const x = t => (t / tMax) * 296 + 2, y = a => 118 - (a / aMax) * 112;
+  const line = pts.map(p => `${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ');
+  const now = pts[pts.length - 1];
+  svg.innerHTML =
+    `<line x1="2" x2="298" y1="118" y2="118" stroke="#262c36"/>` +
+    `<polyline fill="none" stroke="#4fa3ff" stroke-width="2" points="${line}" vector-effect="non-scaling-stroke"/>` +
+    `<circle cx="${x(now[0])}" cy="${y(now[1])}" r="3" fill="#fff"/>` +
+    `<text x="4" y="12" fill="#8b94a3" font-size="10">${fmt(aMax / 1.08)} m</text>` +
+    `<text x="296" y="114" fill="#8b94a3" font-size="10" text-anchor="end">${fmt(tMax)} s</text>`;
+}
+
+async function tick() {
+  let s;
+  try { s = await (await fetch('/api/state', { cache: 'no-store' })).json(); }
+  catch (e) { $('sub').textContent = 'Tracker not reachable'; return; }
+  const site = [s.site.lat, s.site.lon];
+  if (!pad) {
+    pad = L.marker(site, { title: 'Launch site' }).addTo(map).bindPopup('Launch site');
+    map.setView(site, 15);
+  }
+  $('title').textContent = s.rocket;
+  const w = s.weather;
+  $('wsrc').textContent = w.source + (w.error ? ' (live fetch failed)' : '');
+  $('wvalid').textContent = w.valid_time ? w.valid_time.replace('T', ' ').slice(0, 16) + 'Z' : 'n/a';
+  $('events').innerHTML = s.events.slice().reverse().map(e => `<div>T+${e[0]}s ${e[1]}</div>`).join('');
+  if (!s.launched) { $('sub').textContent = 'On the pad, waiting for launch'; return; }
+
+  const st = s.state, p = s.prediction;
+  $('sub').textContent = `Live · filter rejected ${st.rejected} outlier readings`;
+  $('phase').textContent = st.phase;
+  $('t').innerHTML = `${fmt(st.t, 1)}<small> s</small>`;
+  $('alt').innerHTML = `${fmt(st.alt_agl)}<small> m</small>`;
+  $('spd').innerHTML = `${fmt(st.speed)}<small> m/s</small>`;
+  $('wnow').textContent = `${fmt(st.forecast_wind.speed, 1)} m/s from ${fmt(st.forecast_wind.from_deg)}°`;
+  $('wbias').textContent = `${fmt(st.wind_bias[0], 1)} E, ${fmt(st.wind_bias[1], 1)} N m/s`;
+  $('kscale').textContent = fmt(st.drag_scale, 2) + '×';
+
+  track.setLatLngs(s.track.map(q => [q[0], q[1]]));
+  rocket.setLatLng([st.lat, st.lon]).addTo(map);
+  gps.clearLayers();
+  s.gps.forEach(g => L.circleMarker(g, { radius: 2, color: '#7ee0a1', weight: 0, fillOpacity: 0.7 }).addTo(gps));
+
+  if (p) {
+    $('apo').innerHTML = `${fmt(p.apogee_agl)}<small> m</small>`;
+    const d = haversine(site, p.landing), b = bearing(site, p.landing);
+    $('ldist').textContent = `${fmt(d)} m @ ${fmt(b)}°`;
+    $('lell').textContent = `${fmt(p.ellipse_95.semi_major_m)} × ${fmt(p.ellipse_95.semi_minor_m)} m`;
+    $('ltime').textContent = `${fmt(Math.max(p.time_to_landing, 0), 1)} s`;
+    $('lcoord').textContent = `${p.landing[0].toFixed(5)}, ${p.landing[1].toFixed(5)}`;
+    path.setLatLngs(p.path.map(q => [q[0], q[1]]));
+    ellipse.setLatLngs(p.ellipse_95.polygon);
+    landing.setLatLng(p.landing).addTo(map);
+    samples.clearLayers();
+    p.samples.forEach(q => L.circleMarker(q, { radius: 1.5, color: '#ff5d5d', weight: 0, fillOpacity: 0.5 }).addTo(samples));
+    history.setLatLngs((s.landing_history || []).map(h => [h[1], h[2]]));
+    if (!fitted) { map.fitBounds(L.latLngBounds([site, p.landing, ...p.ellipse_95.polygon]).pad(0.2)); fitted = true; }
+  }
+  drawChart(s.track, p);
+}
+tick();
+setInterval(tick, 500);
+</script>
+</body>
+</html>

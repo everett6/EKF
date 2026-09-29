@@ -88,8 +88,9 @@ def parse_gps():
                 try:
                     msg = pynmea2.parse(line)
                     if msg.status == 'A':
-                        lat = msg.latitude if msg.lat_dir == 'N' else -msg.latitude
-                        lon = msg.longitude if msg.lon_dir == 'E' else -msg.longitude
+                        # pynmea2's latitude/longitude are already signed (S and W negative).
+                        lat = msg.latitude
+                        lon = msg.longitude
                         # Convert GPS date/time to timestamp
                         gps_epoch = None
                         try:
@@ -111,8 +112,9 @@ def parse_gps():
                 try:
                     msg = pynmea2.parse(line)
                     if int(msg.gps_qual) > 0:
-                        lat = msg.latitude if msg.lat_dir == 'N' else -msg.latitude
-                        lon = msg.longitude if msg.lon_dir == 'E' else -msg.longitude
+                        # pynmea2's latitude/longitude are already signed (S and W negative).
+                        lat = msg.latitude
+                        lon = msg.longitude
                         alt = float(msg.altitude)
                         sats = int(msg.num_sats)
                         # Use last known gps_epoch from RMC if available
