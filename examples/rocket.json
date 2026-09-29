@@ -1,0 +1,23 @@
+{
+  "rocket": {
+    "name": "Example 54mm J-motor rocket",
+    "dry_mass_kg": 3.2,
+    "propellant_mass_kg": 0.6,
+    "burn_time_s": 1.8,
+    "average_thrust_n": 650,
+    "body_diameter_m": 0.066,
+    "drag_coefficient": 0.45,
+    "drogue_diameter_m": 0.45,
+    "main_diameter_m": 1.2,
+    "main_deploy_agl_m": 200
+  },
+  "site": {
+    "latitude": 37.395390,
+    "longitude": -121.851837,
+    "altitude_m": 180
+  },
+  "weather": {
+    "provider": "open-meteo",
+    "refresh_s": 120
+  }
+}

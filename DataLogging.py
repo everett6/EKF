@@ -51,8 +51,9 @@ def get_gps():
                 msg = pynmea2.parse(line)
                 if int(msg.gps_qual) > 0:
                     gps_fail_count = 0
-                    lat = msg.latitude if msg.lat_dir == 'N' else -msg.latitude
-                    lon = msg.longitude if msg.lon_dir == 'E' else -msg.longitude
+                    # pynmea2's latitude/longitude are already signed (S and W negative).
+                    lat = msg.latitude
+                    lon = msg.longitude
                     alt = float(msg.altitude)
                     return lat, lon, alt
     except:
