@@ -33,7 +33,7 @@ class SimulatedFlight:
     barometer and accelerometer readings at the configured rates.
     """
 
-    def __init__(self, cfg, weather_service, launch_time=None, dt=0.01):
+    def __init__(self, cfg, weather_service, launch_time=None, dt=0.02):
         self.cfg = cfg
         self.site = cfg.site
         self.s = cfg.sensors
@@ -70,7 +70,7 @@ class SimulatedFlight:
                 if t >= next_t[kind] - 1e-9:
                     next_t[kind] += per
                     yield from self._emit(t, X, sf[0], kinds=(kind,))
-            if int(round(t / self.dt)) % 10 == 0:
+            if int(round(t / self.dt)) % max(1, int(round(0.1 / self.dt))) == 0:
                 self.truth_track.append((t, *X[0, 0:3]))
             if phase[0] == LANDED:
                 self.landing_enu = X[0, 0:2].copy()
@@ -134,8 +134,10 @@ class CsvSource:
     unless accel_units="mps2".
     """
 
-    def __init__(self, path, follow=False, accel_units="g", flip_lon=False, poll_s=0.05):
+    def __init__(self, path, follow=False, accel_units="g", flip_lon=False, poll_s=0.05,
+                 should_stop=None):
         self.path = path
+        self.should_stop = should_stop or (lambda: False)
         self.follow = follow
         self.accel_scale = G0 if accel_units == "g" else 1.0
         self.lon_sign = -1.0 if flip_lon else 1.0
@@ -149,7 +151,7 @@ class CsvSource:
             while True:
                 line = f.readline()
                 if not line:
-                    if not self.follow:
+                    if not self.follow or self.should_stop():
                         return
                     time.sleep(self.poll_s)
                     continue

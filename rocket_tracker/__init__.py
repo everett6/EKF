@@ -7,4 +7,4 @@ point from the current estimate, using weather that refreshes during the
 flight.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

@@ -17,8 +17,16 @@ LAUNCH_ACCEL = 3.0 * 9.80665   # specific force that signals ignition
 LAUNCH_ALT_AGL = 20.0          # or a climb this high above the pad
 
 
+def _predict_in_process(rocket, site_alt, profile, x, P, t, phase, pc, seed):
+    """Run one forecast in a worker process (everything passed in must pickle)."""
+    model = FlightModel(rocket, site_alt, lambda: profile)
+    return predict_landing(model, x, P, t, phase, samples=pc.samples,
+                           max_flight_s=pc.max_flight_s, rng=np.random.default_rng(seed),
+                           gust_sigma=pc.gust_sigma, gust_tau_s=pc.gust_tau_s)
+
+
 class Tracker:
-    def __init__(self, cfg, weather_service, rng=None):
+    def __init__(self, cfg, weather_service, rng=None, async_predictions=False):
         self.cfg = cfg
         self.site = cfg.site
         self.weather = weather_service
@@ -38,6 +46,27 @@ class Tracker:
         self._lock = threading.Lock()
         self.weather.listeners.append(self._on_weather)
         self.events = []
+        # In the app, the Monte Carlo forecast runs in a separate process so it
+        # never competes with the filter for the interpreter; tests and the CLI
+        # run it inline.
+        self.async_predictions = async_predictions
+        self._pending = None
+        self._wake = threading.Condition()
+        self._closed = False
+        self._pool = None
+        if async_predictions:
+            from concurrent.futures import ProcessPoolExecutor
+            self._pool = ProcessPoolExecutor(max_workers=1)
+            threading.Thread(target=self._predict_worker, name="predictor", daemon=True).start()
+
+    def close(self):
+        self._closed = True
+        with self._wake:
+            self._wake.notify_all()
+        if self._on_weather in self.weather.listeners:
+            self.weather.listeners.remove(self._on_weather)
+        if self._pool is not None:
+            self._pool.shutdown(wait=False, cancel_futures=True)
 
     # --- weather -------------------------------------------------------------------
     def _on_weather(self, profile):
@@ -79,7 +108,8 @@ class Tracker:
             self._next_prediction = 0.0
         with self._lock:
             if not self.track or t - self.track[-1][0] >= 0.1:
-                self.track.append((t, *self.ekf.x[0:3], self.phase))
+                self.track.append((t, *self.ekf.x[0:3], self.phase,
+                                   float(np.linalg.norm(self.ekf.x[3:6]))))
         if t >= self._next_prediction and self.phase != LANDED:
             self.run_prediction()
             self._next_prediction = t + self.cfg.predictor.interval_s
@@ -121,14 +151,58 @@ class Tracker:
 
     # --- prediction ----------------------------------------------------------------
     def run_prediction(self):
+        job = (self.ekf.x.copy(), self.ekf.P.copy(), self.ekf.t, self.ekf.phase)
+        if self.async_predictions:
+            with self._wake:
+                self._pending = job  # only the newest state matters
+                self._wake.notify()
+            return None
+        return self._predict(*job)
+
+    def _predict(self, x, P, t, phase):
         pc = self.cfg.predictor
-        pred = predict_landing(self.model, self.ekf.x, self.ekf.P, self.ekf.t, self.ekf.phase,
+        pred = predict_landing(self.model, x, P, t, phase,
                                samples=pc.samples, max_flight_s=pc.max_flight_s, rng=self.rng,
                                gust_sigma=pc.gust_sigma, gust_tau_s=pc.gust_tau_s)
         with self._lock:
             self.last_prediction = pred
             self.predictions.append(pred)
         return pred
+
+    def _predict_worker(self):
+        while True:
+            with self._wake:
+                while self._pending is None and not self._closed:
+                    self._wake.wait()
+                if self._closed:
+                    return
+                job, self._pending = self._pending, None
+            try:
+                x, P, t, phase = job
+                fut = self._pool.submit(_predict_in_process, self.cfg.rocket, self.site.altitude_m,
+                                        self.weather.profile, x, P, t, phase, self.cfg.predictor,
+                                        int(self.rng.integers(1 << 31)))
+                pred = fut.result()
+                with self._lock:
+                    self.last_prediction = pred
+                    self.predictions.append(pred)
+            except Exception:
+                if not self._closed:
+                    log.exception("Prediction failed")
+
+    def pad_state(self):
+        """Filter state for a rocket sitting on the pad at ignition."""
+        x0 = np.zeros(N_STATE)
+        x0[8] = 1.0
+        sig_w = self.cfg.weather.forecast_wind_sigma
+        P0 = np.diag([1.0, 1.0, 0.5, 0.1, 0.1, 0.1, sig_w, sig_w, 0.15]) ** 2
+        return x0, P0
+
+    def pad_forecast(self):
+        """Where the rocket would land if launched now, from the pad and current weather."""
+        x0, P0 = self.pad_state()
+        return _predict_in_process(self.cfg.rocket, self.site.altitude_m, self.weather.profile,
+                                   x0, P0, 0.0, BOOST, self.cfg.predictor, 3)
 
     # --- reporting -----------------------------------------------------------------
     def _ll(self, e, n, u=0.0):
@@ -148,13 +222,35 @@ class Tracker:
                   f" ±{p.ellipse[0]:.0f} m, in {max(p.time_to_landing, 0):5.1f} s")
         return s
 
+    def prediction_dict(self, pred, track=()):
+        a, b, ang = pred.ellipse
+        th = np.linspace(0, 2 * np.pi, 48)
+        c, s_ = np.cos(np.radians(ang)), np.sin(np.radians(ang))
+        ex = pred.landing_enu[0] + a * np.cos(th) * c - b * np.sin(th) * s_
+        ny = pred.landing_enu[1] + a * np.cos(th) * s_ + b * np.sin(th) * c
+        apogee = max([pred.apogee_up] + [r[3] for r in track])
+        return {
+            "t": round(pred.t, 1),
+            "landing": list(self._ll(*pred.landing_enu)[0:2]),
+            "landing_enu": [float(v) for v in pred.landing_enu],
+            "ellipse_95": {"semi_major_m": a, "semi_minor_m": b, "angle_deg": ang,
+                           "polygon": [list(self._ll(e, n)[0:2]) for e, n in zip(ex, ny)]},
+            "time_to_landing": pred.time_to_landing,
+            "apogee_agl": apogee,
+            # [lat, lon, alt AGL, seconds after pred.t, metres from pad]
+            "path": [[*self._ll(*p)[0:2], round(float(p[2]), 1), i * 2,
+                      round(float(np.hypot(p[0], p[1])), 1)]
+                     for i, p in enumerate(pred.path_enu[::2])],
+            "samples": [list(self._ll(e, n)[0:2]) for e, n in pred.impacts_enu[:80]],
+        }
+
     def snapshot(self):
         """JSON-ready state for the dashboard."""
         with self._lock:
             track = list(self.track)
             gps = list(self.gps_points[-400:])
             pred = self.last_prediction
-            history = [(p.t, *p.landing_enu) for p in self.predictions]
+            history = [(p.t, *p.landing_enu, p.ellipse[0]) for p in self.predictions]
         out = {
             "site": {"lat": self.site.latitude, "lon": self.site.longitude,
                      "alt": self.site.altitude_m},
@@ -178,25 +274,15 @@ class Tracker:
             "forecast_wind": {"speed": spd, "from_deg": wdir},
             "rejected": self.ekf.rejected,
         }
-        out["track"] = [[*self._ll(e, n, u)[0:2], round(float(u), 1), round(t, 1)]
-                        for t, e, n, u, _ in track[::max(1, len(track) // 1500)]]
+        step = max(1, len(track) // 1500)
+        # [lat, lon, alt AGL, t, speed, metres from pad]
+        out["track"] = [[*self._ll(e, n, u)[0:2], round(float(u), 1), round(t, 1),
+                         round(spd, 1), round(float(np.hypot(e, n)), 1)]
+                        for t, e, n, u, _, spd in track[::step]]
         out["gps"] = [list(self._ll(e, n, u)[0:2]) for t, e, n, u in gps[::2]]
         if pred is not None:
-            a, b, ang = pred.ellipse
-            th = np.linspace(0, 2 * np.pi, 48)
-            c, s_ = np.cos(np.radians(ang)), np.sin(np.radians(ang))
-            ex = pred.landing_enu[0] + a * np.cos(th) * c - b * np.sin(th) * s_
-            ny = pred.landing_enu[1] + a * np.cos(th) * s_ + b * np.sin(th) * c
-            out["prediction"] = {
-                "t": round(pred.t, 1),
-                "landing": list(self._ll(*pred.landing_enu)[0:2]),
-                "landing_enu": [float(v) for v in pred.landing_enu],
-                "ellipse_95": {"semi_major_m": a, "semi_minor_m": b, "angle_deg": ang,
-                               "polygon": [list(self._ll(e, n)[0:2]) for e, n in zip(ex, ny)]},
-                "time_to_landing": pred.time_to_landing,
-                "apogee_agl": max(pred.apogee_up, max(r[3] for r in track)),
-                "path": [[*self._ll(*p)[0:2], round(float(p[2]), 1)] for p in pred.path_enu[::2]],
-                "samples": [list(self._ll(e, n)[0:2]) for e, n in pred.impacts_enu[:80]],
-            }
-            out["landing_history"] = [[round(t, 1), *self._ll(e, n)[0:2]] for t, e, n in history[-300:]]
+            out["prediction"] = self.prediction_dict(pred, track)
+            hist = history[-300:]
+            out["landing_history"] = [[round(t, 1), *self._ll(e, n)[0:2], round(a, 1)]
+                                      for t, e, n, a in hist]
         return out

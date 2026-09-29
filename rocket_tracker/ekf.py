@@ -77,15 +77,18 @@ class ExtendedKalmanFilter:
         self.phase = new_phase
 
     def update(self, z, h_fn, R, name="meas"):
-        """Generic EKF update with a numerical measurement Jacobian and chi-square gating."""
+        """Generic EKF update with a numerical measurement Jacobian and chi-square gating.
+
+        h_fn maps a batch of states (N, 9) to predicted measurements (N, m); the
+        state and its finite-difference perturbations are evaluated in one call.
+        """
         z = np.atleast_1d(np.asarray(z, dtype=float))
         R = np.atleast_2d(R)
-        hx = np.atleast_1d(h_fn(self.x))
-        H = np.zeros((len(z), N_STATE))
-        for i in range(N_STATE):
-            dx = np.zeros(N_STATE)
-            dx[i] = max(1e-4, 1e-6 * abs(self.x[i]))
-            H[:, i] = (np.atleast_1d(h_fn(self.x + dx)) - hx) / dx[i]
+        eps = np.maximum(1e-4, 1e-6 * np.abs(self.x))
+        out = np.asarray(h_fn(np.vstack([self.x, self.x + np.diag(eps)])), dtype=float)
+        out = out.reshape(N_STATE + 1, -1)
+        hx = out[0]
+        H = ((out[1:] - hx) / eps[:, None]).T
         y = z - hx
         S = H @ self.P @ H.T + R
         Sinv = np.linalg.inv(S)
@@ -110,19 +113,19 @@ class ExtendedKalmanFilter:
 
     def update_position(self, enu, sigma_h, sigma_v):
         R = np.diag([sigma_h ** 2, sigma_h ** 2, sigma_v ** 2])
-        return self.update(enu, lambda x: x[0:3], R, "gps")
+        return self.update(enu, lambda X: X[:, 0:3], R, "gps")
 
     def update_altitude(self, up, sigma):
-        return self.update([up], lambda x: x[2:3], [[sigma ** 2]], "baro")
+        return self.update([up], lambda X: X[:, 2:3], [[sigma ** 2]], "baro")
 
     def update_specific_force(self, magnitude, sigma):
         """Accelerometer magnitude: orientation-free, so no attitude solution is needed."""
         if self.t < self._settle_until:
             return False
-        def h(x):
-            _, sf = self.model.forces(x[None, :], self.t, np.array([self.phase]))
-            return np.linalg.norm(sf, axis=1)
+        def h(X):
+            _, sf = self.model.forces(X, self.t, np.full(len(X), self.phase))
+            return np.sqrt(np.einsum("ij,ij->i", sf, sf))[:, None]
         # Thrust and drag are only known to a few percent, so widen the noise
         # in proportion to the force the model predicts.
-        sigma_model = 0.05 * float(h(self.x)[0])
+        sigma_model = 0.05 * float(h(self.x[None, :])[0, 0])
         return self.update([magnitude], h, [[sigma ** 2 + sigma_model ** 2]], "accel")

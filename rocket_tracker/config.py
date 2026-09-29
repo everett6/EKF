@@ -4,6 +4,7 @@ Every value has a placeholder default so the tracker runs out of the box;
 override any of them with a JSON file (see examples/rocket.json).
 """
 
+import copy
 import json
 import math
 from dataclasses import dataclass, field, asdict, fields, is_dataclass
@@ -116,9 +117,37 @@ def _merge(obj, data):
         current = getattr(obj, key)
         if is_dataclass(current):
             _merge(current, value)
-        else:
+        elif isinstance(current, bool):
+            setattr(obj, key, value if isinstance(value, bool) else str(value).lower() == "true")
+        elif isinstance(current, (int, float)):
+            number = float(value)
+            if not math.isfinite(number):
+                raise ValueError(f"{key} must be a finite number")
+            setattr(obj, key, int(number) if isinstance(current, int) else number)
+        elif isinstance(current, list):
+            if not isinstance(value, list):
+                raise ValueError(f"{key} must be a list")
             setattr(obj, key, value)
+        else:
+            setattr(obj, key, str(value))
     return obj
+
+
+def merge_config(cfg, data):
+    """Return a copy of cfg with the (possibly partial) dict applied, after sanity checks."""
+    new = _merge(copy.deepcopy(cfg), data)
+    r = new.rocket
+    for name in ("dry_mass_kg", "burn_time_s", "body_diameter_m", "drag_coefficient"):
+        if getattr(r, name) <= 0:
+            raise ValueError(f"rocket.{name} must be positive")
+    if not -90 <= new.site.latitude <= 90 or not -180 <= new.site.longitude <= 180:
+        raise ValueError("site latitude/longitude out of range")
+    for row in r.thrust_curve:
+        if len(row) != 2:
+            raise ValueError("thrust_curve rows must be [time_s, thrust_n]")
+    if new.predictor.samples < 10:
+        raise ValueError("predictor.samples must be at least 10")
+    return new
 
 
 def load_config(path=None):

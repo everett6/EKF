@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import sys
 import time
 
 import numpy as np
@@ -15,7 +16,8 @@ from .weather import WeatherService
 def build_parser():
     p = argparse.ArgumentParser(
         prog="rocket_tracker",
-        description="Track a rocket in flight and keep predicting where it will land.")
+        description="Track a rocket in flight and keep predicting where it will land. "
+                    "Run 'python -m rocket_tracker app' for the full app.")
     src = p.add_mutually_exclusive_group()
     src.add_argument("--sim", action="store_true", help="simulated flight (default)")
     src.add_argument("--replay", metavar="CSV", help="replay a logged flight")
@@ -39,6 +41,10 @@ def build_parser():
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "app":
+        from .app import main as app_main
+        return app_main(argv[1:])
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.WARNING if args.quiet else logging.INFO,
                         format="%(message)s")

@@ -1,4 +1,4 @@
-"""Tiny built-in web dashboard: live map, altitude and weather (stdlib only)."""
+"""Read-only live dashboard for the command-line tracker (the full app is app.py)."""
 
 import json
 import logging
@@ -27,6 +27,8 @@ class _Handler(SimpleHTTPRequestHandler):
         super().__init__(*a, directory=str(STATIC), **kw)
 
     def do_GET(self):
+        if self.path in ("/", "/index.html"):
+            self.path = "/live.html"
         if self.path.startswith("/api/state"):
             body = json.dumps(self.tracker.snapshot(), default=_default).encode()
             self.send_response(200)
